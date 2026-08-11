@@ -1,0 +1,16 @@
+# environment
+.venv/
+__pycache__/
+*.pyc
+
+# generated: datasets, run records, rendered tables, logs
+# leading slash anchors these to the repo root -- an unanchored `data/` also
+# matches the sadl/data package
+/data/
+/results/
+
+# the paper and its extracted text
+*.pdf
+paper.txt
+
+.DS_Store
