@@ -85,12 +85,20 @@ BUDGET_PRESETS = {
     "full": Budget(steps=4800, batch_per_env=96, sadl_tmax=8, sadl_rmax=3, sadl_check_every=25),
     # For an accelerator: larger batches, more restarts, and a denser acceptance
     # check, which is what actually decides whether a candidate is ever caught in
-    # a passing state.  This is the preset the reported tables should use.
+    # a passing state. This is the preset the reported tables should use.
+    #
+    # sadl_rmax=6 and steps=8000 are set from a direct measurement, not a guess:
+    # on dSprites at tmax=1 (750 steps/restart previously), the adversarial flip
+    # rate declined monotonically across restarts (0.289, 0.285, 0.264, 0.257,
+    # 0.250) and only cleared eps_adv=0.25 on the 5th attempt (restart index 4).
+    # The trunk is shared and keeps training across restarts -- only the head and
+    # Confuser reinitialize -- so a restart is a continuation of the same fight,
+    # not an independent retry, and rmax=3 was one short of what was needed here.
     "gpu": Budget(
-        steps=6000,
+        steps=8000,
         batch_per_env=256,
         sadl_tmax=8,
-        sadl_rmax=3,
+        sadl_rmax=6,
         sadl_check_every=20,
         sadl_check_n=512,
         sadl_audit_subsample=16,
