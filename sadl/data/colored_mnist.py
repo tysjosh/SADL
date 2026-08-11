@@ -17,6 +17,7 @@ from pathlib import Path
 import numpy as np
 
 from .base import EnvSplit, MultiEnvDataset, SyntheticGenerator, split_fit_val
+from .real import require_files
 
 INV_NAMES = ["digit", "label_flip", "mnist_idx"]
 ENV_NAMES = ["color"]
@@ -41,6 +42,11 @@ class ColoredMNISTGenerator(SyntheticGenerator):
 
     def __init__(self, data_dir: Path, label_noise: float = 0.25) -> None:
         raw = Path(data_dir) / "mnist" / "raw"
+        require_files(
+            [raw / f for f in ("train-images-idx3-ubyte", "train-labels-idx1-ubyte",
+                               "t10k-images-idx3-ubyte", "t10k-labels-idx1-ubyte")],
+            "ColoredMNIST",
+        )
         imgs = np.concatenate(
             [_read_idx(raw / "train-images-idx3-ubyte"), _read_idx(raw / "t10k-images-idx3-ubyte")]
         )

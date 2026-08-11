@@ -30,6 +30,22 @@ class DataUnavailable(RuntimeError):
     pass
 
 
+def require_files(paths: list[Path], dataset: str) -> None:
+    """Fail with an actionable message when a download step has not been run.
+
+    Without this the first missing byte surfaces as a bare ``FileNotFoundError``
+    from deep inside a reader, which reads like a code fault rather than a setup
+    step, and is recorded as ``status="failed"`` rather than
+    ``status="data_unavailable"``.
+    """
+    missing = [p for p in paths if not Path(p).exists()]
+    if missing:
+        raise DataUnavailable(
+            f"{dataset}: {len(missing)} required file(s) missing, first is {missing[0]}. "
+            f"Run: python scripts/download_data.py"
+        )
+
+
 REAL_SPECS: dict[str, dict] = {
     "PACS": {
         "root": "PACS",

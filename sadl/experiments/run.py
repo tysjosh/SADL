@@ -63,6 +63,14 @@ def run_one(
         }
     if jpath.exists() and not overwrite:
         cached = read_json(jpath)
+        # Only successful cells are cached.  A failure is usually an environment
+        # problem -- missing data, an unavailable device -- and caching it means a
+        # retry after the fix replays the same failure instead of doing the work.
+        if cached.get("status") != "ok":
+            cached = None
+    else:
+        cached = None
+    if cached is not None:
         stale = cached.get("fingerprint") != _FINGERPRINT
         if stale and "warned" not in _WARNED_STALE:
             _WARNED_STALE.add("warned")
