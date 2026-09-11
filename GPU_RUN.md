@@ -42,33 +42,59 @@ bash -c 'python3 -m venv .venv && .venv/bin/pip install -r requirements.txt'
 .venv/bin/python scripts/download_data.py
 .venv/bin/python -c "import torch; print(torch.cuda.is_available(), torch.cuda.device_count())"
 
-# 2. does anything get accepted now?  ~2 minutes.  This is the go/no-go check.
-.venv/bin/python -m sadl.experiments.run --dataset dSprites --method SADL --seed 0 --budget smoke
-.venv/bin/python -m sadl.experiments.run --dataset ColoredMNIST --method SADL --seed 0 --budget smoke
+# 2. every variant executes at all.  ~10 minutes, CPU-cheap.
+bash scripts/smoke_all.sh
+
+# 3. does anything get accepted at the budget the sweep will use?  GO/NO-GO.
+bash scripts/preflight_gpu.sh
 ```
 
-Read `n_accepted` and the `sadl_trace` in `results/runs/*.json`. Per step the
-trace holds `val_novelty`, `val_shift`, `val_adv_flip`, `val_adv_flip_bank`,
-`val_adv_flip_learned`, `val_adv_flip_worstcase`, `val_balance`, `best_step`, and
-the stop reason.
+Step 3 runs the **first Separator game only** — `sadl_tmax=1` with the `gpu`
+preset's per-game step count (1000), batch size (256) and audit density — on
+dSprites, ColoredMNIST and Causal3DIdent-lite. That is the whole question:
+`SADL.fit` breaks out of the outer loop when a step exhausts its restarts, so if
+`t = 0` never accepts, the sequence is empty, the representation is a column of
+zeros, and every SADL cell in the sweep is a chance-level artefact. Cost is about
+one eighth of a single SADL cell per dataset against a sweep of several hundred.
+Cells are tagged `gate`, so they never collide with a reporting cell.
 
-- If `n_accepted > 0` on dSprites, the old gate was the binding constraint and the
-  full sweep is worth its compute.
-- If `n_accepted == 0` and `val_adv_flip` sits just above `sadl_eps_adv = 0.25`,
-  the game is close; raise `sadl_check_every` density and `sadl_rmax` before
-  concluding, and check whether `val_balance` is extreme (lopsided splits were
-  what passed on ColoredMNIST).
-- If `n_accepted == 0` with `val_novelty == 0` and `val_balance` at 0 or 1, the
-  head collapsed despite the non-collapse floors; report it as an optimisation
-  failure with the trace attached rather than tuning it away silently.
+Do not use `smoke` as the gate. It runs 120 steps at `T=2, R=1` and accepts
+nothing even on ColoredMNIST, so it cannot separate "the method does not clear the
+gate" from "the budget was too small to try".
+
+`scripts/gate_report.py` reads the traces and prints, per restart, `val_novelty`,
+`val_shift`, `val_adv_flip` with its `bank` / `learned` / `worst-case`
+decomposition, `val_balance` and `best_step`, then names which clause of
+Equation 19 bound and by how much. Thresholds are read from the budget the cell
+actually ran with, including `--set` overrides. It exits non-zero when nothing
+accepted anywhere.
+
+- **`go`** — the sequence is not empty; the sweep is worth its compute.
+- **`no-go`, binding `flip`, declining across restarts** — close and still
+  improving. More restarts is the cheap thing to try, and the trunk carries across
+  restarts, so they compound rather than reset.
+- **`no-go`, binding `flip`, flat** — a gate calibration question, not a budget
+  one. Compare `adv_flip_bank` against `adv_flip_learned`: if the bank alone is
+  rejecting, the bank may be leaving `T` on that dataset.
+- **`no-go`, binding `novelty` with `balance` at 0 or 1** — head collapse despite
+  the non-collapse floors. Report it as an optimisation failure with the trace
+  attached rather than tuning it away.
+- **`no-go`, binding `shift`** — the head is still environment-dependent.
 
 ```bash
-# 3. full sweep
+# 4. full sweep
 NGPU=<gpus> bash scripts/run_all.sh          # budget=gpu, seeds 0-4
 ```
 
 Expect the SADL cells to dominate the cost: a sequential game costs about `T`
 times a single adversarial game, and the laptop measured 20-40x ERM per run.
+`results/table10_cost.md` reports this directly once the sweep has run — time,
+peak memory and shared-trunk forward/backward evaluations, each relative to ERM,
+plus accepted distinctions per accelerator-hour. Table 10 trains nothing of its
+own; it reuses the RQ1 and RQ2 cells, which is also what makes the ratios valid.
+Measured at `smoke` on one dataset, `Evals/step` was 47x ERM for SADL-lite and
+18x for SADL, the learned Confuser being the cheaper of the two because it applies
+one amortised transformation where the bank takes a maximum over a subsample.
 
 ## What the sweep is for
 
