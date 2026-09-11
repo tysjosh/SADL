@@ -20,7 +20,16 @@ from ..eval.misspec import build_designations, freeze, load
 from ..methods import BASELINES, TABLE2_METHODS
 from ..utils import RESULTS_DIR, write_json
 from .run import run_grid
-from .tables import confirmatory_analysis, group, markdown_table, metric_table, cell
+from .tables import (
+    absolute_cost_table,
+    accepted_per_hour_table,
+    cell,
+    confirmatory_analysis,
+    cost_table,
+    group,
+    markdown_table,
+    metric_table,
+)
 
 # Set from --shard / --tables; every driver goes through _grid so that sharded
 # execution and pure aggregation share one code path.
@@ -45,6 +54,17 @@ ABLATIONS = [
     ("SADL-warmstart", "+ Confuser-consistent trunk warm start"),
 ]
 ENV_COUNTS = [1, 2, 3, 5, 8]
+
+# Table 10 is measured on the two synthetic benchmarks that every other driver
+# also runs, and with the same keys, so it reuses their cached cells instead of
+# training anything of its own.  That is also what makes the ratios meaningful:
+# "identical hardware and matched input budgets" holds only if the numerator and
+# the denominator come from the same sweep.
+COST_DATASETS = ["ColoredMNIST", "dSprites"]
+# The row set of the paper's Table 10, in its order.
+COST_METHODS = ["ERM", "SimCLR", "MAE", "IRMv1", "DANN", "SADL-lite", "SADL"]
+COST_METHODS_EXTRA = [m for m in TABLE2_METHODS if m not in COST_METHODS]
+COST_SADL_VARIANTS = ["SADL-lite", "SADL"]
 
 
 ONLY_DATASETS: list[str] | None = None
@@ -98,6 +118,7 @@ def _tables_only(args: argparse.Namespace) -> int:
     rq3(args.budget, args.seeds, args.n_per_env)
     rq4(args.budget, args.seeds, args.n_total)
     rq6(args.budget, args.seeds, args.n_per_env)
+    table10(args.budget, args.seeds, args.n_per_env)
     if recs:
         rq5(recs)
     return 0
@@ -348,10 +369,80 @@ def rq6(budget: str, seeds: list[int], n_per_env: int) -> list[dict]:
     return recs
 
 
+# ----------------------------------------------------------------- Table 10
+def table10(budget: str, seeds: list[int], n_per_env: int) -> list[dict]:
+    """Table 10: computational cost relative to ERM.
+
+    Section 6.4 asks for wall-clock time, peak accelerator memory and
+    forward/backward evaluations, all relative to ERM; Section 5.7 adds accepted
+    distinctions per accelerator-hour, which only applies to the SADL rows.
+
+    The cells are the same keys RQ1 and RQ2 use, so this trains nothing once
+    either of those has run.
+    """
+    recs = _grid(
+        COST_DATASETS, TABLE2_METHODS, seeds, budget=budget, dataset_kwargs={"n_per_env": n_per_env}
+    )
+    if DRY_RUN:
+        return recs
+    # _grid applies the --datasets filter internally; the caption and the ratios
+    # have to describe what was actually aggregated, not the unfiltered default.
+    datasets = [d for d in COST_DATASETS if ONLY_DATASETS is None or d in ONLY_DATASETS]
+
+    n_mem = sum(1 for r in recs if r.get("status") == "ok" and str(r.get("device", "")).startswith("cuda"))
+    mem_note = (
+        ""
+        if n_mem
+        else (
+            "\nThe memory column is `n/a`: a true peak is only available from "
+            "`torch.cuda.max_memory_allocated`, which is reset before each fit. MPS exposes no "
+            "peak counter in torch 2.4 and CPU none at all, so no residual allocation is "
+            "reported here as though it were a peak.\n"
+        )
+    )
+    missing_evals = [
+        r for r in recs if r.get("status") == "ok" and r.get("evals_per_step") is None
+    ]
+    stale_note = (
+        f"\n{len(missing_evals)} cached record(s) predate the evaluation counter and carry no "
+        "`evals_per_step`; re-run those cells with `--overwrite` to fill that column.\n"
+        if missing_evals
+        else ""
+    )
+
+    text = (
+        "### Table 10: computational cost relative to ERM\n\n"
+        f"budget={budget}, seeds={seeds}, datasets={datasets}. Ratios are formed inside each "
+        "(dataset, seed) cell and then averaged, so numerator and denominator always share "
+        "hardware and input budget; mean ± sd is over those cells. `Evals/step` counts shared-trunk "
+        "forward plus backward evaluations per environment-balanced minibatch, relative to ERM, and "
+        "includes SADL's periodic acceptance audits and compression probe because Algorithm 1 does.\n"
+        "\nRead `Time/ERM` for the SADL rows together with the `Steps` column below: a sequence that "
+        "stops early on `restarts_exhausted` runs fewer games and so costs less, which makes the "
+        "time ratio a measurement of what the run did rather than of the method's budget.\n"
+        + mem_note
+        + stale_note
+        + "\n"
+        + cost_table(recs, datasets, COST_METHODS)
+        + "\n\n#### Remaining Table 2 methods\n\n"
+        + cost_table(recs, datasets, COST_METHODS_EXTRA)
+        + "\n\n#### Absolute figures behind the ratios\n\n"
+        + absolute_cost_table(recs, datasets, TABLE2_METHODS)
+        + "\n\n#### Accepted distinctions per accelerator-hour (Section 5.7)\n\n"
+        + accepted_per_hour_table(recs, datasets, COST_SADL_VARIANTS)
+    )
+    _write("table10_cost", {"records": recs}, text)
+    return recs
+
+
 # --------------------------------------------------------------------- CLI
 def main() -> int:
     ap = argparse.ArgumentParser(description="run the SADL research questions")
-    ap.add_argument("which", choices=["rq1", "rq2", "rq3", "rq4", "rq5", "rq6", "tables", "all"])
+    ap.add_argument(
+        "which",
+        choices=["rq1", "rq2", "rq3", "rq4", "rq5", "rq6", "cost", "tables", "all"],
+        help="'cost' renders Table 10 from the RQ1/RQ2 cells",
+    )
     ap.add_argument("--budget", default="quick")
     ap.add_argument("--seeds", type=int, nargs="+", default=[0, 1, 2])
     ap.add_argument("--n-per-env", type=int, default=4000)
@@ -388,6 +479,8 @@ def main() -> int:
         rq4(args.budget, args.seeds, args.n_total)
     if args.which in ("rq6", "all"):
         rq6(args.budget, args.seeds, args.n_per_env)
+    if args.which in ("cost", "all"):
+        table10(args.budget, args.seeds, args.n_per_env)
     if args.which == "all" and main_recs:
         rq5(main_recs)
     return 0

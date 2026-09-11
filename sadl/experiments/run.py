@@ -14,7 +14,7 @@ import numpy as np
 import torch
 
 from ..data import DataUnavailable, get_dataset
-from ..eval import composability, evaluate_ood, factor_recovery, stability_gap
+from ..eval import composability, count_encoder_evals, evaluate_ood, factor_recovery, stability_gap
 from ..methods import BUDGET_PRESETS, Budget, build_method, method_meta
 from ..utils import (
     RESULTS_DIR,
@@ -114,10 +114,15 @@ def run_one(
         m = build_method(method, bud, device, seed)
         if device.type == "cuda":
             torch.cuda.reset_peak_memory_stats(device)
-        with Timer() as t:
+        # Table 10 needs forward/backward evaluations as well as time and memory,
+        # and only the training phase counts: the counter closes before the
+        # readout and the metrics are computed, so it measures the objective
+        # rather than the shared evaluation protocol.
+        with count_encoder_evals() as costs, Timer() as t:
             log = m.fit(ds)
         record["train_seconds"] = t.elapsed
         record["peak_mem_mb"] = peak_memory_mb(device)
+        record.update(costs.as_dict())
         record["n_params"] = m.n_params()
         record["repr_dim"] = m.repr_dim
         record["n_accepted"] = log.get("n_accepted")

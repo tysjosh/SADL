@@ -66,6 +66,7 @@ command would cost before starting it.
 ```bash
 .venv/bin/python -m sadl.experiments.rqs rq3 --budget gpu --seeds 0 1 2 3 4
 .venv/bin/python -m sadl.experiments.rqs rq2 --budget gpu --seeds 0 1 2 3 4 --dry-run
+.venv/bin/python -m sadl.experiments.rqs cost --budget gpu --seeds 0 1 2 3 4   # Table 10
 
 # narrow an RQ to particular datasets or methods
 .venv/bin/python -m sadl.experiments.rqs rq6 --datasets dSprites --methods SADL SADL-warmstart
@@ -75,7 +76,9 @@ command would cost before starting it.
 ```
 
 `rq5` scores frozen representations from the RQ2 cells, so run `rq2` first; it
-then reads from cache and trains nothing itself.
+then reads from cache and trains nothing itself. `cost` (Table 10) is the same:
+its cells are the RQ1 and RQ2 keys, which is also what makes the ratios valid —
+numerator and denominator come from the same sweep on the same hardware.
 
 **One cell.** `(dataset, method, seed)` on its own, with any `Budget` field
 overridable from the command line. Use `--tag` for one-off variants so they get
@@ -144,6 +147,21 @@ empirical stability gap on pairs that share `z_inv` and resample `z_env`
 (Equation 22). Continuous representations are quantile-discretised and binarised
 at their training median so a 128-dimensional feature vector and a 4-bit code are
 scored by the same rule.
+
+**Cost** (Section 6.4, Table 10): wall-clock time, peak accelerator memory, and
+forward/backward evaluations, each relative to ERM, plus accepted distinctions per
+accelerator-hour (Section 5.7). Evaluations are counted by patching
+`ConvEncoder.forward` and `EnvBalancedLoader.__iter__` for the duration of `fit`
+(`eval/cost.py`), so the shared trunk is the unit of work compared across
+objectives. The class is patched rather than the instance because SADL's accepted
+distinctions hold trunk copies made during `fit` and its flip objective
+re-evaluates the trunk once per transformation in the bank; instance hooks would
+miss both and understate its cost. The count covers everything inside `fit`,
+including SADL's acceptance audits and compression probe, and nothing after it, so
+the shared readout and metrics are excluded from every method equally. Memory is
+reported only for CUDA runs, where `max_memory_allocated` is a true high-water
+mark; MPS exposes no peak counter, so its residual allocation is left as `n/a`
+instead of being presented as a peak.
 
 **Statistics** (Section 6.5): training-domain validation for all model selection,
 shared seeds across methods, mean ± sd, paired SADL-minus-baseline effects with
@@ -259,6 +277,8 @@ does not run. Each is isolated and switchable.
 - `table7_rq3_confuser.md` — RQ3
 - `table8_rq4_env_count.md` — RQ4
 - `table9_rq5_composability.md` — RQ5
+- `table10_cost.md` — computational cost relative to ERM, with the absolute
+  figures behind the ratios and accepted distinctions per accelerator-hour
 - `split_designations.json` — frozen split diagnostic
 - `runs/*.json` — one record per cell, including the full SADL acceptance trace
   (per-step novelty, shift, flip rate, balance, restart, stop reason)

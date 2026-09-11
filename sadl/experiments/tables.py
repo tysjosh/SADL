@@ -5,6 +5,7 @@ from collections import defaultdict
 
 import numpy as np
 
+from ..eval.cost import memory_is_peak
 from ..eval.stats import hierarchical_bootstrap_worst_acc, holm, mean_std, paired_effect
 from ..utils import read_json
 from .run import load_correctness
@@ -126,3 +127,123 @@ def confirmatory_analysis(
 
 def load_records(paths: list[str]) -> list[dict]:
     return [read_json(p) for p in paths]
+
+
+# ------------------------------------------------------- cost (Table 10)
+def _by_cell(records: list[dict]) -> dict[tuple[str, str, int], dict]:
+    return {
+        (r["dataset"], r["method"], r["seed"]): r for r in records if r.get("status") == "ok"
+    }
+
+
+def paired_ratios(
+    records: list[dict],
+    datasets: list[str],
+    method: str,
+    metric: str,
+    reference: str = "ERM",
+    peak_memory_only: bool = False,
+) -> list[float]:
+    """Ratios of ``metric`` to the reference method, paired within (dataset, seed).
+
+    Pairing matters: the two synthetic benchmarks differ in resolution and sample
+    count, so a ratio of pooled means would be dominated by whichever dataset is
+    slower.  A ratio formed inside a (dataset, seed) cell compares runs that used
+    the same hardware, the same input budget and the same data, which is the
+    "identical hardware and matched input budgets" Table 10 asks for.
+    """
+    cells = _by_cell(records)
+    out: list[float] = []
+    for d in datasets:
+        for (dd, mm, seed), rec in sorted(cells.items()):
+            if dd != d or mm != method:
+                continue
+            ref = cells.get((d, reference, seed))
+            if ref is None:
+                continue
+            if peak_memory_only and not (memory_is_peak(rec.get("device")) and memory_is_peak(ref.get("device"))):
+                continue
+            num, den = rec.get(metric), ref.get(metric)
+            if num is None or den is None:
+                continue
+            num, den = float(num), float(den)
+            if not np.isfinite(num) or not np.isfinite(den) or den <= 0:
+                continue
+            out.append(num / den)
+    return out
+
+
+def _ratio_cell(ratios: list[float], nd: int = 2, suffix: str = "") -> str:
+    if not ratios:
+        return "n/a"
+    m, s = mean_std(ratios)
+    if np.isnan(m):
+        return "n/a"
+    if len(ratios) < 2 or np.isnan(s):
+        return f"{m:.{nd}f}{suffix}"
+    return f"{m:.{nd}f} ± {s:.{nd}f}{suffix}"
+
+
+def cost_table(records: list[dict], datasets: list[str], methods: list[str], reference: str = "ERM") -> str:
+    """Table 10: time, peak memory and trunk evaluations, all relative to ERM."""
+    header = ["Method", "Time/ERM", "Memory/ERM", "Evals/step"]
+    rows = []
+    for m in methods:
+        rows.append(
+            [
+                m,
+                _ratio_cell(paired_ratios(records, datasets, m, "train_seconds", reference)),
+                _ratio_cell(
+                    paired_ratios(records, datasets, m, "peak_mem_mb", reference, peak_memory_only=True)
+                ),
+                _ratio_cell(paired_ratios(records, datasets, m, "evals_per_step", reference)),
+            ]
+        )
+    return markdown_table(header, rows)
+
+
+def absolute_cost_table(records: list[dict], datasets: list[str], methods: list[str]) -> str:
+    """The same runs in absolute units, so the ratios above can be checked."""
+    g = group(records)
+    header = ["Method", "Train (s)", "Peak mem (MB)", "Trunk fwd", "Trunk bwd", "Steps", "Evals/step"]
+    rows = []
+    for m in methods:
+        recs = [r for d in datasets for r in g.get((d, m), [])]
+        ok = [r for r in recs if r.get("status") == "ok"]
+        mem = [r for r in ok if memory_is_peak(r.get("device"))]
+        rows.append(
+            [
+                m,
+                cell(recs, "train_seconds", pct=False, nd=1),
+                cell(mem, "peak_mem_mb", pct=False, nd=0) if mem else "n/a",
+                cell(recs, "n_encoder_forward", pct=False, nd=0),
+                cell(recs, "n_encoder_backward", pct=False, nd=0),
+                cell(recs, "n_train_steps", pct=False, nd=0),
+                cell(recs, "evals_per_step", pct=False, nd=2),
+            ]
+        )
+    return markdown_table(header, rows)
+
+
+def accepted_per_hour_table(records: list[dict], datasets: list[str], methods: list[str]) -> str:
+    """Accepted distinctions per accelerator-hour (Section 5.7)."""
+    g = group(records)
+    header = ["Variant", "Accepted T", "Train (s)", "Accepted / accelerator-hour"]
+    rows = []
+    for m in methods:
+        recs = [r for d in datasets for r in g.get((d, m), [])]
+        ok = [r for r in recs if r.get("status") == "ok" and r.get("n_accepted") is not None]
+        rates = [
+            r["n_accepted"] / (r["train_seconds"] / 3600.0)
+            for r in ok
+            if r.get("train_seconds")
+        ]
+        rows.append(
+            [
+                m,
+                cell(recs, "n_accepted", pct=False, nd=2),
+                cell(recs, "train_seconds", pct=False, nd=1),
+                _ratio_cell(rates, nd=1) if rates else "n/a",
+            ]
+        )
+    return markdown_table(header, rows)
