@@ -158,18 +158,31 @@ def stability_gap(method, ds: MultiEnvDataset, n: int = 2000, seed: int = 0) -> 
     if ra.shape[1] == 0:
         return {"stability_gap": float("nan")}
     ref = np.concatenate([method.features(e.fit().x[:1000]) for e in ds.train_envs])
+    active = np.array([len(np.unique(ref[:, j])) > 1 for j in range(ref.shape[1])])
+    if not active.any():
+        # A constant representation is trivially invariant, so Equation 25 would
+        # score it 0.0 -- a perfect stability gap earned by encoding nothing.  A
+        # SADL run that accepted no distinction lands here, and averaging that
+        # 0.0 into a method's mean turns a capacity failure into its best result.
+        # Report it as undefined so it is excluded rather than counted.
+        return {
+            "stability_gap": float("nan"),
+            "stability_gap_per_dim": [],
+            "stability_gap_max": float("nan"),
+            "stability_gap_degenerate": True,
+        }
     if getattr(method, "repr_kind", "continuous") == "binary":
         thr = np.full(ra.shape[1], 0.5)
     else:
         thr = np.median(ref, axis=0)
     ba, bb = (ra > thr), (rb > thr)
     per_dim = (ba != bb).mean(axis=0)
-    active = np.array([len(np.unique(ref[:, j])) > 1 for j in range(ref.shape[1])])
-    used = per_dim[active] if active.any() else per_dim
+    used = per_dim[active]
     return {
         "stability_gap": float(used.mean()),
         "stability_gap_per_dim": per_dim.tolist(),
         "stability_gap_max": float(used.max()),
+        "stability_gap_degenerate": False,
     }
 
 
