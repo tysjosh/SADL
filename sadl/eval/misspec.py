@@ -13,10 +13,24 @@ runs are excluded so the designation cannot depend on the method under test.  A
 split is designated
 
   ``misspecified``   if the relation is significantly positive with slope at or
-                     above ``slope_threshold`` (accuracy is on the line),
-  ``well_specified`` otherwise,
-  ``indeterminate``  if there are too few models or the ID accuracies are
-                     essentially constant, so the diagnostic cannot be evaluated.
+                     above ``SLOPE_THRESHOLD`` (accuracy is on the line),
+  ``well_specified`` if the slope is significantly *below* ``SLOPE_THRESHOLD`` by
+                     a one-sided test, so there is positive evidence that accuracy
+                     is off the line,
+  ``indeterminate``  if neither holds: too few models, essentially constant ID
+                     accuracies, or a fit too noisy to place the slope on either
+                     side of the threshold.
+
+The third case is why the test is one-sided against the threshold rather than
+two-sided against zero.  Failing to show that a split is on the line is not
+evidence that it is off it, and ``well_specified`` is not a null result: it is the
+subset Table 4 reports and it feeds the preregistered contrast of Equation 26, so
+admitting a split on absent evidence changes the headline comparison.  A slope of
+-0.26 with a standard error of 0.23 is not significantly different from zero
+(p = 0.28) yet is comfortably below 0.5 (p = 0.002); a slope of -0.26 with a
+standard error of 1.5 is neither, and belongs in ``indeterminate``.  Section 6.2
+expects exactly this category, requiring that classifications and exclusions be
+listed "including failed or indeterminate diagnostics".
 
 The designation is written to disk with a hash of the inputs and is read back
 unchanged when the SADL comparisons are made.
@@ -35,7 +49,7 @@ MIN_POINTS = 6
 MIN_ID_SPREAD = 0.02
 
 
-def diagnose(id_acc: list[float], ood_acc: list[float]) -> dict:
+def diagnose(id_acc: list[float], ood_acc: list[float], alpha: float = 0.05) -> dict:
     x = np.asarray(id_acc, dtype=float)
     y = np.asarray(ood_acc, dtype=float)
     ok = ~(np.isnan(x) | np.isnan(y))
@@ -48,15 +62,48 @@ def diagnose(id_acc: list[float], ood_acc: list[float]) -> dict:
             "id_spread": float(x.max() - x.min()) if len(x) else float("nan"),
         }
     res = stats.linregress(x, y)
-    on_the_line = bool(res.slope >= SLOPE_THRESHOLD and res.pvalue < 0.05 and res.rvalue > 0)
+    df = len(x) - 2
+
+    # One-sided test of H0: slope >= SLOPE_THRESHOLD against H1: slope < it.
+    # Rejecting H0 is the evidence that accuracy is off the line.
+    se = float(res.stderr)
+    if not np.isfinite(se) or se <= 0:
+        # A perfectly collinear pool leaves no sampling variation to test; place
+        # the slope by direct comparison rather than dividing by zero.
+        p_below = 0.0 if res.slope < SLOPE_THRESHOLD else 1.0
+        t_below = float("-inf") if res.slope < SLOPE_THRESHOLD else float("inf")
+    else:
+        t_below = (float(res.slope) - SLOPE_THRESHOLD) / se
+        p_below = float(stats.t.cdf(t_below, df))
+
+    on_the_line = bool(res.slope >= SLOPE_THRESHOLD and res.pvalue < alpha and res.rvalue > 0)
+    off_the_line = bool(p_below < alpha)
+    if on_the_line:
+        designation, reason = "misspecified", "slope on the line and significantly positive"
+    elif off_the_line:
+        designation, reason = "well_specified", "slope significantly below the threshold"
+    else:
+        designation, reason = (
+            "indeterminate",
+            "fit too noisy to place the slope on either side of the threshold",
+        )
     return {
-        "designation": "misspecified" if on_the_line else "well_specified",
+        "designation": designation,
+        "reason": reason,
         "slope": float(res.slope),
+        "slope_stderr": se,
         "r": float(res.rvalue),
         "p": float(res.pvalue),
+        "t_below_threshold": float(t_below),
+        "p_below_threshold": p_below,
         "n_models": int(len(x)),
         "id_spread": float(x.max() - x.min()),
-        "criterion": f"slope >= {SLOPE_THRESHOLD} and p < 0.05 and r > 0 => misspecified",
+        "alpha": float(alpha),
+        "criterion": (
+            f"slope >= {SLOPE_THRESHOLD} and p < {alpha} and r > 0 => misspecified; "
+            f"one-sided p(slope < {SLOPE_THRESHOLD}) < {alpha} => well_specified; "
+            "otherwise indeterminate"
+        ),
     }
 
 

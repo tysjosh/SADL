@@ -177,7 +177,15 @@ def rq2(budget: str, seeds: list[int], n_per_env: int) -> list[dict]:
         designations = freeze(built, _out("split_designations.json"))
     print("\nsplit designations:")
     for d, v in designations.items():
-        print(f"  {d:20s} {v['designation']:15s} " + (f"slope={v.get('slope', float('nan')):.2f} r={v.get('r', float('nan')):.2f} p={v.get('p', float('nan')):.3f}" if "slope" in v else v.get("reason", "")))
+        if "slope" in v:
+            detail = (
+                f"slope={v['slope']:+.3f}±{v.get('slope_stderr', float('nan')):.3f} "
+                f"r={v.get('r', float('nan')):+.2f} p={v.get('p', float('nan')):.3f} "
+                f"p(slope<{0.5})={v.get('p_below_threshold', float('nan')):.4f}"
+            )
+        else:
+            detail = v.get("reason", "")
+        print(f"  {d:20s} {v['designation']:15s} {detail}")
 
     # Stage 2: SADL and its fixed-bank ablation.
     sadl_recs = _grid(datasets, ["SADL-lite", "SADL"], seeds, budget=budget, dataset_kwargs={"n_per_env": n_per_env})
@@ -191,9 +199,14 @@ def rq2(budget: str, seeds: list[int], n_per_env: int) -> list[dict]:
     t5 = metric_table(recs, datasets, TABLE2_METHODS, "acc_worst", add_mean=True)
     t5b = metric_table(recs, datasets, TABLE2_METHODS, "acc_avg", add_mean=True)
     text = (
-        "### Table 4: worst-environment accuracy on splits designated well specified (RQ2)\n\n"
-        f"budget={budget}, seeds={seeds}. Designations were frozen from baseline runs only, "
-        "before any SADL run was evaluated.\n\n" + t4 + "\n\n"
+        "### Split designations (Section 6.2)\n\n"
+        "Frozen from baseline runs only, before any SADL run was evaluated. Section 6.2 requires "
+        "the classifications and exclusions to be listed, including failed and indeterminate "
+        "diagnostics, so every candidate split appears here whether or not it reaches Table 4.\n\n"
+        + _designation_table(designations)
+        + "\n\n### Table 4: worst-environment accuracy on splits designated well specified (RQ2)\n\n"
+        f"budget={budget}, seeds={seeds}. Only the splits designated `well_specified` above are "
+        "reported here; the rest are excluded rather than assigned a result.\n\n" + t4 + "\n\n"
         "### Table 5: worst-environment accuracy on all splits (RQ2)\n\n" + t5 + "\n\n"
         "### Table 5b: average-environment accuracy on all splits\n\n" + t5b + "\n\n"
         "### Confirmatory comparison\n\n" + _analysis_table(analysis) + "\n\n"
@@ -205,6 +218,43 @@ def rq2(budget: str, seeds: list[int], n_per_env: int) -> list[dict]:
         text,
     )
     return recs
+
+
+def _designation_table(designations: dict) -> str:
+    """Every candidate split with the numbers behind its designation."""
+    header = [
+        "Split",
+        "Designation",
+        "In Table 4",
+        "Slope",
+        "SE",
+        "r",
+        "p (slope != 0)",
+        "p (slope < 0.5)",
+        "Models",
+        "Reason",
+    ]
+    rows = []
+    f = lambda v, nd=3: "n/a" if v is None or (isinstance(v, float) and np.isnan(v)) else f"{v:.{nd}f}"
+    for d, v in sorted(designations.items()):
+        des = v.get("designation", "?")
+        rows.append(
+            [
+                d,
+                des,
+                "yes" if des == "well_specified" else "no",
+                f(v.get("slope")),
+                f(v.get("slope_stderr")),
+                f(v.get("r")),
+                f(v.get("p")),
+                f(v.get("p_below_threshold"), 4),
+                str(v.get("n_models", "n/a")),
+                str(v.get("reason", "")),
+            ]
+        )
+    if not rows:
+        return "_no split was designated: no baseline records were available_"
+    return markdown_table(header, rows)
 
 
 def _analysis_table(analysis: dict) -> str:

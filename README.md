@@ -204,11 +204,22 @@ does not run. Each is isolated and switchable.
 
 3. **The misspecification diagnostic is an operationalisation.** Salaudeen et
    al.'s protocol is approximated by fitting worst-environment accuracy against
-   in-distribution validation accuracy over the baseline model pool and
-   designating a split `misspecified` when the relation is significantly positive
-   with slope ≥ 0.5 ("accuracy on the line"). SADL runs are excluded from the fit,
-   and the designation is written to `results/split_designations.json` with a hash
-   of its inputs before any SADL comparison is made.
+   in-distribution validation accuracy over the baseline model pool. A split is
+   `misspecified` when the relation is significantly positive with slope ≥ 0.5
+   ("accuracy on the line"), `well_specified` when a one-sided test places the
+   slope significantly *below* 0.5, and `indeterminate` otherwise. The test is
+   one-sided against the threshold rather than two-sided against zero because
+   failing to show a split is on the line is not evidence that it is off it, and
+   `well_specified` is not the null: it is the subset Table 4 reports and it feeds
+   Equation 26. A slope of +1.12 with a standard error of 0.84 is not significantly
+   different from zero, but its point estimate is firmly on the line and it does
+   not belong in Table 4. Section 6.2 expects this third category, requiring that
+   classifications and exclusions be listed "including failed or indeterminate
+   diagnostics", so `table4_5_rq2_ood.md` opens with every candidate split, its
+   slope, standard error, both p-values, and whether it reached Table 4. SADL runs
+   are excluded from the fit, and the designation is written to
+   `results/split_designations.json` with a hash of its inputs before any SADL
+   comparison is made.
 
 4. **The compression gate probe is label-free.** Equation 20 stops the sequence
    when the marginal probe gain falls below a threshold. Using downstream labels
