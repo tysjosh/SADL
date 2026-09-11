@@ -112,6 +112,24 @@ when it reads a record produced by different code rather than mixing versions
 silently. Every run also stores per-instance correctness vectors, which is what
 the hierarchical bootstrap resamples.
 
+**`--n-per-env` is not part of the cache key.** Sample count and `--n-train-envs`
+are recorded in the record but not in the key, so a cell run at one sample count
+is reused by a later command that asks for another, without retraining and without
+a warning:
+
+```bash
+.venv/bin/python -m sadl.experiments.run --dataset dSprites --method ERM --seed 0 --budget gpu --n-per-env 400
+.venv/bin/python -m sadl.experiments.rqs rq1 --budget gpu --seeds 0 --n-per-env 8000   # reuses the 400 cell
+```
+
+Either pass the `--n-per-env` the sweep uses on every individual run
+(`scripts/run_all.sh` defaults to `NPE=8000`), or give off-spec runs their own key
+with `--tag`. That is what `--tag` is for, and why `scripts/preflight_gpu.sh` tags
+its cells `gate`: its `sadl_tmax=1` override must never be mistaken for a
+reporting cell. To repair a contaminated cell, re-run it with `--overwrite` or
+delete its `results/runs/*.json`. Budget overrides passed with `--set` are
+recorded under `budget_overrides` and are likewise not in the key.
+
 `results/archive_local_mps/` holds an earlier partial sweep from a laptop (MPS,
 `quick` budget, 3 seeds, older code). It is kept for reference only and is not
 read by the runner.
