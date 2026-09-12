@@ -17,9 +17,20 @@ class Interval:
     point: float
     lo: float
     hi: float
+    # How many seeds the interval was actually computed from, and how many were
+    # unusable.  A CI over 2 of 5 seeds is not the CI the protocol asks for, so the
+    # count travels with the estimate rather than being inferred from the caller.
+    n_seeds: int = 0
+    n_seeds_dropped: int = 0
 
     def as_dict(self) -> dict:
-        return {"point": self.point, "ci_lo": self.lo, "ci_hi": self.hi}
+        return {
+            "point": self.point,
+            "ci_lo": self.lo,
+            "ci_hi": self.hi,
+            "n_seeds": self.n_seeds,
+            "n_seeds_dropped": self.n_seeds_dropped,
+        }
 
 
 def hierarchical_bootstrap_worst_acc(
@@ -32,28 +43,49 @@ def hierarchical_bootstrap_worst_acc(
     ``correctness_by_seed[i][env]`` is a 0/1 vector of per-instance correctness.
     Resampling is nested: seeds, then environments within a seed, then instances
     within an environment.
+
+    Seeds with no usable vectors are dropped rather than crashing or being scored.
+    ``load_correctness`` returns an empty dict when a record's ``.npz`` is absent --
+    a cell interrupted between writing its json and its vectors, or records moved
+    between machines without them -- and an empty record cannot contribute to a
+    resample of instances.  Treating it as zero accuracy would be worse than
+    dropping it, so the count of dropped seeds is returned alongside the interval
+    and reported next to the table.
     """
     rng = np.random.default_rng(seed)
-    if not correctness_by_seed:
-        return Interval(float("nan"), float("nan"), float("nan"))
-    point = float(np.mean([min(np.mean(v) for v in rec.values()) for rec in correctness_by_seed]))
+    n_given = len(correctness_by_seed)
+    usable = [r for r in correctness_by_seed if r and all(np.size(v) for v in r.values())]
+    dropped = n_given - len(usable)
+    if not usable:
+        return Interval(float("nan"), float("nan"), float("nan"), 0, dropped)
+    # Resample only environments present in every usable seed: a seed missing an
+    # environment would otherwise raise, and the minimum over a varying set of
+    # environments is not comparable across seeds.
+    env_names = sorted(set.intersection(*(set(r) for r in usable)))
+    if not env_names:
+        return Interval(float("nan"), float("nan"), float("nan"), 0, dropped)
+
+    n_seeds = len(usable)
+    point = float(np.mean([min(float(np.mean(rec[e])) for e in env_names) for rec in usable]))
     draws = np.empty(n_boot)
-    n_seeds = len(correctness_by_seed)
-    env_names = list(correctness_by_seed[0].keys())
     for b in range(n_boot):
-        seed_idx = rng.integers(0, n_seeds, n_seeds)
         vals = []
-        for si in seed_idx:
-            rec = correctness_by_seed[si]
+        for si in rng.integers(0, n_seeds, n_seeds):
+            rec = usable[si]
             names = [env_names[j] for j in rng.integers(0, len(env_names), len(env_names))]
             env_accs = []
             for name in names:
                 arr = rec[name]
-                idx = rng.integers(0, len(arr), len(arr))
-                env_accs.append(arr[idx].mean())
+                env_accs.append(arr[rng.integers(0, len(arr), len(arr))].mean())
             vals.append(min(env_accs))
         draws[b] = np.mean(vals)
-    return Interval(point, float(np.quantile(draws, 0.025)), float(np.quantile(draws, 0.975)))
+    return Interval(
+        point,
+        float(np.quantile(draws, 0.025)),
+        float(np.quantile(draws, 0.975)),
+        n_seeds,
+        dropped,
+    )
 
 
 def paired_effect(

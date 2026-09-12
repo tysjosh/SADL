@@ -195,6 +195,26 @@ def rq2(budget: str, seeds: list[int], n_per_env: int) -> list[dict]:
     analysis = confirmatory_analysis(recs, datasets, BASELINES)
     delta_spec = _delta_spec(recs, datasets, well)
 
+    # A hierarchical bootstrap computed from fewer seeds than were run is not the
+    # interval Section 6.5 specifies, so say so next to the table instead of
+    # leaving it to be discovered in the JSON.
+    short = []
+    for d, v in analysis["per_dataset"].items():
+        for arm in ("treatment_bootstrap", "baseline_bootstrap"):
+            b = v.get(arm) or {}
+            if b.get("n_seeds_dropped"):
+                short.append(f"{d} {arm.split('_')[0]}: {b['n_seeds']} seed(s) used, {b['n_seeds_dropped']} dropped")
+    boot_note = (
+        "\n**Hierarchical bootstrap coverage.** Some cells had no per-instance correctness "
+        "vectors (`.npz` absent), so their seeds are excluded from the bootstrap; the paired "
+        "effect and its p-value are unaffected because they read `acc_worst` from the record. "
+        "Re-run those cells with `--overwrite` to restore full coverage.\n\n  - "
+        + "\n  - ".join(short)
+        + "\n"
+        if short
+        else ""
+    )
+
     t4 = metric_table(recs, well, TABLE2_METHODS, "acc_worst", add_mean=True) if well else "_no split was designated well specified_"
     t5 = metric_table(recs, datasets, TABLE2_METHODS, "acc_worst", add_mean=True)
     t5b = metric_table(recs, datasets, TABLE2_METHODS, "acc_avg", add_mean=True)
@@ -209,7 +229,8 @@ def rq2(budget: str, seeds: list[int], n_per_env: int) -> list[dict]:
         "reported here; the rest are excluded rather than assigned a result.\n\n" + t4 + "\n\n"
         "### Table 5: worst-environment accuracy on all splits (RQ2)\n\n" + t5 + "\n\n"
         "### Table 5b: average-environment accuracy on all splits\n\n" + t5b + "\n\n"
-        "### Confirmatory comparison\n\n" + _analysis_table(analysis) + "\n\n"
+        "### Confirmatory comparison\n\n" + _analysis_table(analysis) + "\n"
+        + boot_note + "\n"
         f"Preregistered contrast (Equation 26): Delta_spec = {delta_spec['delta_spec']}\n"
     )
     _write(
