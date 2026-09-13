@@ -160,11 +160,17 @@ def compare(recorded: dict | None, current: dict | None = None) -> dict:
     if not differs:
         return {"status": "ok", "material": False, "differs": [], "reason": "identical source"}
     if material:
+        other = [g for g in differs if g not in MATERIAL_GROUPS]
         return {
             "status": "incomparable",
             "material": True,
             "differs": differs,
-            "reason": "changed: " + ", ".join(differs) + " -- these can change a record's numbers",
+            "material_differs": material,
+            "reason": (
+                ", ".join(material)
+                + " changed, which can alter a record's numbers"
+                + (f" (also {', '.join(other)}, which cannot)" if other else "")
+            ),
         }
     return {
         "status": "compatible",

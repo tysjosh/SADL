@@ -16,8 +16,7 @@ import torch
 from ..data import DataUnavailable, get_dataset
 from ..eval import composability, count_encoder_evals, evaluate_ood, factor_recovery, stability_gap
 from ..methods import BUDGET_PRESETS, Budget, build_method, method_meta
-from ..provenance import compare as compare_provenance
-from ..provenance import source_fingerprints
+from ..provenance import classify_record, legacy_fingerprints, source_fingerprints
 from ..utils import (
     RESULTS_DIR,
     Timer,
@@ -32,6 +31,23 @@ from ..utils import (
 _FINGERPRINT = source_fingerprint()
 _FINGERPRINTS = source_fingerprints()
 _WARNED_STALE: set[str] = set()
+_LEGACY: dict[str, dict[str, str]] | None = None
+
+
+def _legacy_map() -> dict[str, dict[str, str]]:
+    """Per-group fingerprints for records that carry only the flat hash.
+
+    Built lazily and once per process: it shells out to git, which is wasted work
+    for a sweep whose records all carry their own group hashes, and pointless
+    latency on ``--list`` or ``--help``.  Without it, every record written before
+    ``sadl/provenance.py`` classifies as ``unknown`` and therefore warns -- which
+    made ``run_one`` contradict ``scripts/verify_resume.py``, the one telling the
+    user those same records were fine.
+    """
+    global _LEGACY
+    if _LEGACY is None:
+        _LEGACY = legacy_fingerprints()
+    return _LEGACY
 
 
 def run_key(dataset: str, method: str, seed: int, budget: str, tag: str = "") -> str:
@@ -74,19 +90,25 @@ def run_one(
     else:
         cached = None
     if cached is not None:
-        prov = compare_provenance(cached.get("fingerprints"), _FINGERPRINTS)
+        # Records with their own group hashes need no git lookup; only fall back to
+        # the reconstructed map for pre-provenance records.
+        legacy = None if cached.get("fingerprints") else _legacy_map()
+        prov = classify_record(cached, _FINGERPRINTS, legacy)
         # Only warn when the difference could change the record's numbers.  A
         # blanket warning on every source edit is why a real invalidation was
         # dismissed as noise once already; see sadl/provenance.py.
         if prov["material"] and prov["status"] not in _WARNED_STALE:
             _WARNED_STALE.add(prov["status"])
             print(
-                f"[warn] reusing cached records that this code cannot reproduce: {prov['reason']}. "
-                f"Re-run the affected cells with --overwrite, or accept that the table mixes "
-                f"two versions of the method.",
+                f"[warn] reusing cached records this code cannot reproduce ({prov['status']}): "
+                f"{prov['reason']}. Run scripts/verify_resume.py for the affected cells, then "
+                f"re-run them with --overwrite -- otherwise the table mixes two versions of the "
+                f"method.",
                 flush=True,
             )
-        cached["stale_cache"] = prov["status"] != "ok"
+        # `stale_cache` means "these numbers may not be reproducible", not merely
+        # "the source differs somewhere" -- a compatible record is not stale.
+        cached["stale_cache"] = prov["material"]
         cached["provenance"] = prov
         return cached
 
