@@ -73,6 +73,11 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--runs", default=None, help="defaults to $SADL_RESULTS/runs or results/runs")
     ap.add_argument(
+        "--rerun-script",
+        default="/tmp/sadl_rerun.sh",
+        help="where to write the --overwrite commands for incomparable cells",
+    )
+    ap.add_argument(
         "--git-depth",
         type=int,
         default=15,
@@ -120,7 +125,13 @@ def main() -> int:
         prov = compare(groups, mine_groups)
         prov_status[prov["status"]] += 1
         if prov["material"]:
-            incomparable[(rec["dataset"], rec["method"])].append(rec["seed"])
+            # Key on the full cache key minus the seed: budget and tag must not be
+            # collapsed, or `smoke` scratch cells appear in the same row as the
+            # reporting cells and the list stops being actionable.
+            npe_of = (rec.get("dataset_kwargs") or {}).get("n_per_env")
+            incomparable[
+                (rec["dataset"], rec["method"], rec.get("budget"), rec.get("tag") or "", npe_of)
+            ].append(rec["seed"])
         budgets[f"{rec.get('budget')}{'/' + rec['tag'] if rec.get('tag') else ''}"] += 1
         npe[str((rec.get("dataset_kwargs") or {}).get("n_per_env"))] += 1
         if not p.with_suffix(".npz").exists():
@@ -149,10 +160,28 @@ def main() -> int:
         ok = False
         n = sum(len(v) for v in incomparable.values())
         print(f"\n  {n} record(s) this code cannot reproduce:")
-        for k in sorted(incomparable):
-            print(f"    {k[0]:22s} {k[1]:12s} seeds {sorted(incomparable[k])}")
-        print("  Re-run these with --overwrite. Records that are merely 'compatible' do not")
-        print("  need re-running: a table built from them is still one comparison.")
+        cmds = []
+        for k in sorted(incomparable, key=lambda k: (k[2] != "gpu", k[3] != "", k)):
+            ds, m, budget, tag, npe_of = k
+            seeds = sorted(incomparable[k])
+            label = f"{budget}{'/' + tag if tag else ''}"
+            print(f"    {ds:22s} {m:18s} {label:16s} n_per_env={str(npe_of):5s} seeds {seeds}")
+            for s in seeds:
+                # Reuse the cell's own n_per_env: it is not part of the cache key, so
+                # re-running with a different value would silently change the cell
+                # rather than reproduce it.
+                cmds.append(
+                    f".venv/bin/python -m sadl.experiments.run --dataset {ds} --method {m} "
+                    f"--seed {s} --budget {budget}"
+                    + (f" --tag {tag}" if tag else "")
+                    + (f" --n-per-env {npe_of}" if npe_of else "")
+                    + " --overwrite"
+                )
+        script = Path(args.rerun_script)
+        script.write_text("#!/usr/bin/env bash\nset -uo pipefail\n" + "\n".join(cmds) + "\n")
+        print(f"\n  Re-run commands written to {script} ({len(cmds)} cells).")
+        print("  Reporting cells are the `gpu` ones with no tag; the rest are scratch and can be")
+        print("  deleted instead. Records that are merely 'compatible' do NOT need re-running.")
 
     if len(npe) > 1:
         ok = False
