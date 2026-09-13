@@ -27,48 +27,6 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 
-def _legacy_map(depth: int) -> dict[str, dict[str, str]]:
-    """Recover per-group fingerprints for records that only carry the flat hash.
-
-    Records written before ``sadl/provenance.py`` existed store a single hash over
-    the whole package, which says nothing about *which* files changed.  The group
-    hashes can still be reconstructed from git: replay the last ``depth`` commits,
-    compute both the flat hash and the group hashes for each, and index by the
-    flat hash.  A record whose flat hash matches a known commit is then classified
-    exactly as a fresh record would be.
-    """
-    import hashlib
-    import subprocess
-    import tempfile
-
-    try:
-        shas = subprocess.run(
-            ["git", "log", "--format=%H", "-n", str(depth)],
-            cwd=ROOT, capture_output=True, text=True, check=True,
-        ).stdout.split()
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        print("  (no git history available; legacy records stay 'unknown')")
-        return {}
-
-    from sadl.provenance import source_fingerprints
-
-    out: dict[str, dict[str, str]] = {}
-    for sha in shas:
-        with tempfile.TemporaryDirectory() as td:
-            tar = subprocess.run(["git", "archive", sha, "sadl"], cwd=ROOT,
-                                 capture_output=True, check=True).stdout
-            subprocess.run(["tar", "-x", "-C", td], input=tar, check=True)
-            pkg = Path(td) / "sadl"
-            if not pkg.is_dir():
-                continue
-            flat = hashlib.sha256()
-            for p in sorted(pkg.rglob("*.py")):
-                flat.update(p.name.encode())
-                flat.update(p.read_bytes())
-            out.setdefault(flat.hexdigest()[:12], source_fingerprints(pkg))
-    return out
-
-
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--runs", default=None, help="defaults to $SADL_RESULTS/runs or results/runs")
@@ -80,13 +38,14 @@ def main() -> int:
     ap.add_argument(
         "--git-depth",
         type=int,
-        default=15,
+        default=50,
         help="how many commits to replay when classifying records that predate per-group "
-        "fingerprints (0 to skip)",
+        "fingerprints (0 to skip). Cheap -- a few tenths of a second -- and must reach far "
+        "enough back to cover the oldest records still in results/runs",
     )
     args = ap.parse_args()
 
-    from sadl.provenance import compare, source_fingerprints
+    from sadl.provenance import classify_record, legacy_fingerprints, source_fingerprints
     from sadl.utils import source_fingerprint
 
     runs = Path(args.runs) if args.runs else Path(os.environ.get("SADL_RESULTS", ROOT / "results")) / "runs"
@@ -96,7 +55,9 @@ def main() -> int:
 
     mine = source_fingerprint()
     mine_groups = source_fingerprints()
-    legacy = _legacy_map(args.git_depth) if args.git_depth else {}
+    legacy = legacy_fingerprints(args.git_depth) if args.git_depth else {}
+    if args.git_depth and not legacy:
+        print("  (no git history available; records without group fingerprints stay 'unknown')")
     paths = sorted(runs.glob("*.json"))
     status: collections.Counter = collections.Counter()
     prints: collections.Counter = collections.Counter()
@@ -121,8 +82,7 @@ def main() -> int:
         reusable += 1
         flat = rec.get("fingerprint", "none")
         prints[flat] += 1
-        groups = rec.get("fingerprints") or legacy.get(flat)
-        prov = compare(groups, mine_groups)
+        prov = classify_record(rec, mine_groups, legacy)
         prov_status[prov["status"]] += 1
         if prov["material"]:
             # Key on the full cache key minus the seed: budget and tag must not be

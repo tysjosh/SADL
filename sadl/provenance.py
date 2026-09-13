@@ -78,6 +78,68 @@ def source_fingerprints(pkg: Path | None = None) -> dict[str, str]:
     return out
 
 
+def legacy_fingerprints(depth: int = 15, repo: Path | None = None) -> dict[str, dict[str, str]]:
+    """Group hashes for commits, indexed by the flat ``source_fingerprint()`` hash.
+
+    Records written before this module existed carry only the flat hash, which says
+    nothing about *which* files changed.  Replaying recent commits recovers the
+    group hashes, so a legacy record can be classified exactly as a fresh one.
+    Returns an empty map when git is unavailable, in which case legacy records stay
+    ``unknown``.
+    """
+    import hashlib
+    import subprocess
+    import tempfile
+
+    repo = repo or PKG.parent
+    try:
+        shas = subprocess.run(
+            ["git", "log", "--format=%H", "-n", str(depth)],
+            cwd=repo, capture_output=True, text=True, check=True,
+        ).stdout.split()
+    except (subprocess.CalledProcessError, FileNotFoundError, OSError):
+        return {}
+
+    out: dict[str, dict[str, str]] = {}
+    for sha in shas:
+        try:
+            tar = subprocess.run(
+                ["git", "archive", sha, PKG.name], cwd=repo, capture_output=True, check=True
+            ).stdout
+        except subprocess.CalledProcessError:
+            continue
+        with tempfile.TemporaryDirectory() as td:
+            subprocess.run(["tar", "-x", "-C", td], input=tar, check=True)
+            pkg = Path(td) / PKG.name
+            if not pkg.is_dir():
+                continue
+            flat = hashlib.sha256()
+            for p in sorted(pkg.rglob("*.py")):
+                flat.update(p.name.encode())
+                flat.update(p.read_bytes())
+            out.setdefault(flat.hexdigest()[:12], source_fingerprints(pkg))
+    return out
+
+
+def classify_record(
+    record: dict,
+    current: dict | None = None,
+    legacy: dict[str, dict[str, str]] | None = None,
+) -> dict:
+    """Classify a whole record, preferring its group hashes and falling back to the
+    flat hash via ``legacy``.
+
+    Use this rather than calling ``compare`` directly on ``record["fingerprints"]``:
+    every record written before this module has no such key, so a bare ``compare``
+    reports all of them ``unknown`` and therefore material, which is both wrong and
+    alarming.
+    """
+    groups = record.get("fingerprints")
+    if not groups and legacy:
+        groups = legacy.get(record.get("fingerprint", ""))
+    return compare(groups, current)
+
+
 def compare(recorded: dict | None, current: dict | None = None) -> dict:
     """Classify a record's provenance against the running code.
 
