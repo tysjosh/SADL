@@ -13,9 +13,28 @@ PY=${PY:-.venv/bin/python}
 
 echo "=== checkout"
 git rev-parse HEAD
-echo "  If the records were produced at a different commit, verify_resume.py below"
-echo "  will say so per group -- it does not require an exact match, only that the"
-echo "  train and metric code agree."
+# A stale checkout cost 1.3 GPU-hours once: 60 cells were re-run to record a metric
+# whose implementation had not been pulled, so they reproduced values that already
+# existed and produced nothing. Provenance cannot catch this -- the records are
+# internally consistent, they just lack fields the newer code would have written.
+if git fetch -q origin 2>/dev/null; then
+  behind=$(git rev-list --count HEAD..origin/main 2>/dev/null || echo 0)
+  if [ "${behind:-0}" -gt 0 ]; then
+    echo
+    echo "  !! this checkout is $behind commit(s) BEHIND origin/main:"
+    git log --oneline HEAD..origin/main | sed 's/^/     /'
+    echo "     Run 'git pull' before training anything. A cell run against old code"
+    echo "     silently omits any metric added since, and looks successful doing it."
+    echo
+  else
+    echo "  up to date with origin/main"
+  fi
+else
+  echo "  (could not reach origin; cannot confirm the checkout is current)"
+fi
+echo "  verify_resume.py below reports per-group comparability of the downloaded"
+echo "  records -- it does not require an exact commit match, only that the train"
+echo "  and metric code agree."
 
 echo
 echo "=== environment"
