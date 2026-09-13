@@ -66,6 +66,10 @@ COST_METHODS = ["ERM", "SimCLR", "MAE", "IRMv1", "DANN", "SADL-lite", "SADL"]
 COST_METHODS_EXTRA = [m for m in TABLE2_METHODS if m not in COST_METHODS]
 COST_SADL_VARIANTS = ["SADL-lite", "SADL"]
 
+# Methods that train their own classifier, and can therefore be scored the way
+# their source papers score them as well as under the shared frozen readout.
+OWN_CLF_METHODS = ["ERM", "IRMv1", "VREx", "DANN"]
+
 
 ONLY_DATASETS: list[str] | None = None
 ONLY_METHODS: list[str] | None = None
@@ -229,6 +233,17 @@ def rq2(budget: str, seeds: list[int], n_per_env: int) -> list[dict]:
         "reported here; the rest are excluded rather than assigned a result.\n\n" + t4 + "\n\n"
         "### Table 5: worst-environment accuracy on all splits (RQ2)\n\n" + t5 + "\n\n"
         "### Table 5b: average-environment accuracy on all splits\n\n" + t5b + "\n\n"
+        "### Table 5c: worst-environment accuracy under each method's OWN classifier\n\n"
+        "Tables 4, 5 and 5b use the shared frozen-feature readout of Section 6.3, which is the "
+        "preregistered protocol and the only one SADL can be scored under. That protocol discards "
+        "the classifier IRM and VREx actually train, and refits an ERM readout on their frozen "
+        "features -- so the shortcut those methods suppress in the *classifier* is simply "
+        "relearned. Below, the methods that train their own classifier are scored with it, which "
+        "is how their source papers report them. Cite this column when comparing against "
+        "published numbers, and Table 5 when comparing representations.\n\n"
+        + metric_table(recs, datasets, OWN_CLF_METHODS, "acc_worst_own", add_mean=True)
+        + "\n\n_Blank cells are runs recorded before this second protocol existed; re-run them "
+        "with `--overwrite` to fill it._\n\n"
         "### Confirmatory comparison\n\n" + _analysis_table(analysis) + "\n"
         + boot_note + "\n"
         f"Preregistered contrast (Equation 26): Delta_spec = {delta_spec['delta_spec']}\n"

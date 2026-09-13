@@ -17,6 +17,10 @@ from ..data import DataUnavailable, get_dataset
 from ..eval import composability, count_encoder_evals, evaluate_ood, factor_recovery, stability_gap
 from ..methods import BUDGET_PRESETS, Budget, build_method, method_meta
 from ..provenance import classify_record, legacy_fingerprints, source_fingerprints
+from .ownclf import own_classifier_metrics
+
+# Prefix distinguishing own-classifier correctness vectors inside a run's .npz.
+OWN_PREFIX = "own__"
 from ..utils import (
     RESULTS_DIR,
     Timer,
@@ -162,6 +166,12 @@ def run_one(
         correctness = ood.pop("correctness")
         record.update(ood)
 
+        # Methods with their own classifier are scored a second way; see ownclf.py
+        # for why the frozen-readout protocol alone misrepresents IRM and VREx.
+        own = own_classifier_metrics(m, ds)
+        correctness_own = own.pop("correctness_own", {})
+        record.update(own)
+
         rep_train = np.concatenate([m.features(e.fit().x) for e in ds.train_envs])
         z_test = np.concatenate([e.z_inv for e in ds.test_envs]) if ds.fr_factor_names else None
         if z_test is not None:
@@ -177,7 +187,13 @@ def run_one(
         record["status"] = "ok"
 
         out_dir.mkdir(parents=True, exist_ok=True)
-        np.savez_compressed(out_dir / f"{key}.npz", **{k: v for k, v in correctness.items()})
+        # Both correctness sets share one archive; own-classifier vectors are
+        # prefixed so load_correctness can ask for either protocol.
+        np.savez_compressed(
+            out_dir / f"{key}.npz",
+            **{k: v for k, v in correctness.items()},
+            **{f"{OWN_PREFIX}{k}": v for k, v in correctness_own.items()},
+        )
     except DataUnavailable as exc:
         record["status"] = "data_unavailable"
         record["error"] = str(exc)
@@ -190,14 +206,25 @@ def run_one(
     return record
 
 
-def load_correctness(record: dict, out_dir: Path | None = None) -> dict[str, np.ndarray]:
+def load_correctness(
+    record: dict, out_dir: Path | None = None, which: str = "readout"
+) -> dict[str, np.ndarray]:
+    """Per-instance correctness vectors under one evaluation protocol.
+
+    ``which="readout"`` is the frozen-feature logistic readout of Section 6.3, the
+    preregistered protocol and the only one every method can be scored under.
+    ``which="own"`` is the method's own classifier, present only for methods that
+    have one.
+    """
     out_dir = Path(out_dir or RESULTS_DIR / "runs")
     key = run_key(record["dataset"], record["method"], record["seed"], record["budget"], record.get("tag", ""))
     path = out_dir / f"{key}.npz"
     if not path.exists():
         return {}
     with np.load(path) as blob:
-        return {k: blob[k] for k in blob.files}
+        if which == "own":
+            return {k[len(OWN_PREFIX) :]: blob[k] for k in blob.files if k.startswith(OWN_PREFIX)}
+        return {k: blob[k] for k in blob.files if not k.startswith(OWN_PREFIX)}
 
 
 def shard_of(index: int, shard: tuple[int, int] | None) -> bool:

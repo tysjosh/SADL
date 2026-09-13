@@ -166,6 +166,23 @@ empirical stability gap on pairs that share `z_inv` and resample `z_env`
 at their training median so a 128-dimensional feature vector and a 4-bit code are
 scored by the same rule.
 
+**Two evaluation protocols.** Section 6.3 scores every method by fitting one
+logistic readout on frozen features, so differences come from the objective rather
+than readout capacity. That is right for representation learners, and it destroys
+the mechanism of the invariance methods: IRM does not remove a shortcut from the
+features, it finds a *classifier* whose gradient is simultaneously optimal across
+environments, so refitting an ERM readout on its frozen features relearns the
+shortcut. Measured on ColoredMNIST at the smoke budget, IRMv1 scores 0.094
+worst-environment accuracy under the shared readout and 0.480 under its own
+classifier, with in-distribution accuracy falling 0.866 → 0.532 — the low-train,
+high-test signature IRM is supposed to have. ERM is unchanged by the swap (0.097
+vs 0.098), which is the control. `experiments/ownclf.py` therefore records
+`acc_worst_own`, `acc_avg_own` and `acc_id_val_own` for the methods that train a
+classifier (ERM, IRMv1, VREx, DANN), detected structurally rather than by name, and
+`table4_5_rq2_ood.md` reports them as Table 5c. The frozen-readout columns stay
+primary — they are preregistered and the only protocol SADL can be scored under —
+but Table 5c is the column to cite against published numbers.
+
 **Cost** (Section 6.4, Table 10): wall-clock time, peak accelerator memory, and
 forward/backward evaluations, each relative to ERM, plus accepted distinctions per
 accelerator-hour (Section 5.7). Evaluations are counted by patching
