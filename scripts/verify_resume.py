@@ -27,11 +27,61 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 
+def _legacy_map(depth: int) -> dict[str, dict[str, str]]:
+    """Recover per-group fingerprints for records that only carry the flat hash.
+
+    Records written before ``sadl/provenance.py`` existed store a single hash over
+    the whole package, which says nothing about *which* files changed.  The group
+    hashes can still be reconstructed from git: replay the last ``depth`` commits,
+    compute both the flat hash and the group hashes for each, and index by the
+    flat hash.  A record whose flat hash matches a known commit is then classified
+    exactly as a fresh record would be.
+    """
+    import hashlib
+    import subprocess
+    import tempfile
+
+    try:
+        shas = subprocess.run(
+            ["git", "log", "--format=%H", "-n", str(depth)],
+            cwd=ROOT, capture_output=True, text=True, check=True,
+        ).stdout.split()
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        print("  (no git history available; legacy records stay 'unknown')")
+        return {}
+
+    from sadl.provenance import source_fingerprints
+
+    out: dict[str, dict[str, str]] = {}
+    for sha in shas:
+        with tempfile.TemporaryDirectory() as td:
+            tar = subprocess.run(["git", "archive", sha, "sadl"], cwd=ROOT,
+                                 capture_output=True, check=True).stdout
+            subprocess.run(["tar", "-x", "-C", td], input=tar, check=True)
+            pkg = Path(td) / "sadl"
+            if not pkg.is_dir():
+                continue
+            flat = hashlib.sha256()
+            for p in sorted(pkg.rglob("*.py")):
+                flat.update(p.name.encode())
+                flat.update(p.read_bytes())
+            out.setdefault(flat.hexdigest()[:12], source_fingerprints(pkg))
+    return out
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--runs", default=None, help="defaults to $SADL_RESULTS/runs or results/runs")
+    ap.add_argument(
+        "--git-depth",
+        type=int,
+        default=15,
+        help="how many commits to replay when classifying records that predate per-group "
+        "fingerprints (0 to skip)",
+    )
     args = ap.parse_args()
 
+    from sadl.provenance import compare, source_fingerprints
     from sadl.utils import source_fingerprint
 
     runs = Path(args.runs) if args.runs else Path(os.environ.get("SADL_RESULTS", ROOT / "results")) / "runs"
@@ -40,9 +90,13 @@ def main() -> int:
         return 2
 
     mine = source_fingerprint()
+    mine_groups = source_fingerprints()
+    legacy = _legacy_map(args.git_depth) if args.git_depth else {}
     paths = sorted(runs.glob("*.json"))
     status: collections.Counter = collections.Counter()
     prints: collections.Counter = collections.Counter()
+    prov_status: collections.Counter = collections.Counter()
+    incomparable: collections.defaultdict = collections.defaultdict(list)
     npe: collections.Counter = collections.Counter()
     budgets: collections.Counter = collections.Counter()
     missing_npz: list[str] = []
@@ -60,7 +114,13 @@ def main() -> int:
         if st != "ok":
             continue
         reusable += 1
-        prints[rec.get("fingerprint", "none")] += 1
+        flat = rec.get("fingerprint", "none")
+        prints[flat] += 1
+        groups = rec.get("fingerprints") or legacy.get(flat)
+        prov = compare(groups, mine_groups)
+        prov_status[prov["status"]] += 1
+        if prov["material"]:
+            incomparable[(rec["dataset"], rec["method"])].append(rec["seed"])
         budgets[f"{rec.get('budget')}{'/' + rec['tag'] if rec.get('tag') else ''}"] += 1
         npe[str((rec.get("dataset_kwargs") or {}).get("n_per_env"))] += 1
         if not p.with_suffix(".npz").exists():
@@ -73,16 +133,26 @@ def main() -> int:
     print("  n_per_env: " + ", ".join(f"{k}={v}" for k, v in sorted(npe.items())))
 
     ok = True
-    print(f"\nthis checkout's source fingerprint: {mine}")
-    for fp, n in prints.most_common():
-        mark = "match" if fp == mine else "MISMATCH -> records were produced by different code"
-        print(f"  {fp}  {n:4d} record(s)   {mark}")
-        if fp != mine:
-            ok = False
-    if not ok:
-        print("\n  Fix by checking out the commit that produced them, or re-run those cells with")
-        print("  --overwrite. Do not mix: a table built from two versions of the method is not")
-        print("  a comparison.")
+    print(f"\nsource provenance (this checkout: flat {mine})")
+    for g, h in sorted(mine_groups.items()):
+        print(f"    {g:8s} {h}")
+    print("  records by comparability:")
+    for st, n in prov_status.most_common():
+        note = {
+            "ok": "identical source",
+            "compatible": "differs only where it cannot change a record's numbers",
+            "incomparable": "differs in train/metric code -- MUST be re-run",
+            "unknown": "predates per-group fingerprints and no matching commit found",
+        }[st]
+        print(f"    {st:13s} {n:4d}   {note}")
+    if incomparable:
+        ok = False
+        n = sum(len(v) for v in incomparable.values())
+        print(f"\n  {n} record(s) this code cannot reproduce:")
+        for k in sorted(incomparable):
+            print(f"    {k[0]:22s} {k[1]:12s} seeds {sorted(incomparable[k])}")
+        print("  Re-run these with --overwrite. Records that are merely 'compatible' do not")
+        print("  need re-running: a table built from them is still one comparison.")
 
     if len(npe) > 1:
         ok = False

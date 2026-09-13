@@ -16,6 +16,8 @@ import torch
 from ..data import DataUnavailable, get_dataset
 from ..eval import composability, count_encoder_evals, evaluate_ood, factor_recovery, stability_gap
 from ..methods import BUDGET_PRESETS, Budget, build_method, method_meta
+from ..provenance import compare as compare_provenance
+from ..provenance import source_fingerprints
 from ..utils import (
     RESULTS_DIR,
     Timer,
@@ -28,6 +30,7 @@ from ..utils import (
 )
 
 _FINGERPRINT = source_fingerprint()
+_FINGERPRINTS = source_fingerprints()
 _WARNED_STALE: set[str] = set()
 
 
@@ -71,16 +74,20 @@ def run_one(
     else:
         cached = None
     if cached is not None:
-        stale = cached.get("fingerprint") != _FINGERPRINT
-        if stale and "warned" not in _WARNED_STALE:
-            _WARNED_STALE.add("warned")
+        prov = compare_provenance(cached.get("fingerprints"), _FINGERPRINTS)
+        # Only warn when the difference could change the record's numbers.  A
+        # blanket warning on every source edit is why a real invalidation was
+        # dismissed as noise once already; see sadl/provenance.py.
+        if prov["material"] and prov["status"] not in _WARNED_STALE:
+            _WARNED_STALE.add(prov["status"])
             print(
-                f"[warn] cached runs were produced by a different source version "
-                f"({cached.get('fingerprint')} != {_FINGERPRINT}); pass --overwrite "
-                f"or clear results/runs to regenerate",
+                f"[warn] reusing cached records that this code cannot reproduce: {prov['reason']}. "
+                f"Re-run the affected cells with --overwrite, or accept that the table mixes "
+                f"two versions of the method.",
                 flush=True,
             )
-        cached["stale_cache"] = stale
+        cached["stale_cache"] = prov["status"] != "ok"
+        cached["provenance"] = prov
         return cached
 
     device = device or get_device()
@@ -98,6 +105,7 @@ def run_one(
         "tag": tag,
         "device": str(device),
         "fingerprint": _FINGERPRINT,
+        "fingerprints": _FINGERPRINTS,
         "dataset_kwargs": {k: v for k, v in dataset_kwargs.items() if k != "env_specs"},
         "budget_overrides": budget_overrides or {},
         **method_meta(method),
