@@ -69,6 +69,26 @@ class Budget:
     sadl_eta: float = 0.01
     sadl_sequential: bool = True
     sadl_compression_gate: bool = True
+    # ---- v2 corrections, all off by default so the defaults reproduce v1 -------
+    # (1) Marginal-preserving Confuser.  E_X|q(tau x) - q(x)| is maximised by
+    #     shoving every input to one side of the boundary, which makes the hard
+    #     flip rate identically min(p, 1-p) -- observed in 21 of 22 restarts -- so
+    #     gating at eps_adv caps novelty at Hb(eps_adv) and forbids balanced
+    #     distinctions outright.  A genuine nuisance resampling cannot move the
+    #     marginal of a stable distinction, which is Proposition 5.1's own premise,
+    #     so penalise the adversary for moving it.
+    sadl_conf_marginal: float = 0.0
+    # (2) Label-free sufficiency pressure.  Theorem 4.1 requires stable *and*
+    #     sufficient; Equation 18 contains no sufficiency term, which is why the
+    #     codes come out invariant and nearly empty.  Reuses the Equation 20 probe
+    #     as a training signal instead of only a stopping rule.
+    sadl_lambda_suf: float = 0.0
+    sadl_suf_proj_dim: int = 32
+    # (3) Cross-environment reference for the audit.  env_resample swaps nuisance
+    #     statistics with a reference image; drawing that reference from the same
+    #     environment makes the audited operation weaker than the one used in
+    #     training.
+    sadl_audit_cross_env: bool = False
     extras: dict[str, Any] = field(default_factory=dict)
 
     def with_(self, **kw: Any) -> "Budget":

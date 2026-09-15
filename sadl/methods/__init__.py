@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from .base import BUDGET_PRESETS, Budget, Method
 from .sadl import SADL, SADLJoint, SADLLite
-from .selfsup import MAE, BetaVAE, FactorVAE, SimCLR
+from .selfsup import MAE, BetaVAE, FactorVAE, SimCLR, SimCLRBank
 from .supervised import DANN, ERM, IRMv1, VREx
 
 _BUILDERS: dict[str, callable] = {
@@ -17,6 +17,9 @@ _BUILDERS: dict[str, callable] = {
     "DANN": lambda b, d, s: DANN(b, d, s),
     "SADL-lite": lambda b, d, s: SADLLite(b, d, s),
     "SADL": lambda b, d, s: SADL(b, d, s),
+    # The control for every SADL claim: same transformation family, none of the
+    # algorithm.  Not part of Table 2; reported alongside it.
+    "SimCLR-bank": lambda b, d, s: SimCLRBank(b, d, s),
 }
 
 # Ablations (Table 6) and Confuser families (Table 7).
@@ -35,6 +38,44 @@ _ABLATIONS: dict[str, dict] = {
     "SADL-conf-fixed3": {"base": "SADL", "budget": {"sadl_confuser": "fixed3", "sadl_audit_bank": "fixed3"}},
     "SADL-conf-fixed10": {"base": "SADL", "budget": {"sadl_confuser": "fixed10", "sadl_audit_bank": "fixed10"}},
     "SADL-conf-learned": {"base": "SADL", "budget": {"sadl_confuser": "learned", "sadl_audit_bank": "fixed10"}},
+    # ---- v2: one entry per correction, plus the combination ------------------
+    # Each targets a failure observed in the v1 sweep, and each binds on a
+    # different dataset, so the single-fix rows are informative on their own.
+    #
+    # fix1 -- marginal-preserving Confuser.  Targets the novelty ceiling, which
+    # binds where the *learned* adversary is the stronger one: ColoredMNIST, where
+    # the gate read learned 0.459 against bank 0.146.
+    "SADL-v2-fix1": {"base": "SADL", "budget": {"sadl_conf_marginal": 5.0}},
+    # fix2 -- label-free sufficiency term.  Targets composability 0.228 and factor
+    # recovery 0.006, which fail on every dataset because Equation 18 has no
+    # sufficiency term while Theorem 4.1 requires one.
+    "SADL-v2-fix2": {"base": "SADL", "budget": {"sadl_lambda_suf": 1.0}},
+    # fix3 -- coverage-complete audit.  Targets the stability gaps of 0.271 and
+    # 0.247, which occur where the *bank* is the binding adversary (dSprites and
+    # Causal3DIdent, bank in ~9 of 10 trace rows) and the bank lacks env_resample.
+    "SADL-v2-fix3": {
+        "base": "SADL",
+        "budget": {"sadl_audit_bank": "fixed11", "sadl_audit_cross_env": True},
+    },
+    "SADL-v2": {
+        "base": "SADL",
+        "budget": {
+            "sadl_conf_marginal": 5.0,
+            "sadl_lambda_suf": 1.0,
+            "sadl_audit_bank": "fixed11",
+            "sadl_audit_cross_env": True,
+        },
+    },
+    # Leave-one-out from the full v2, for the ablation table.
+    "SADL-v2-no-fix1": {
+        "base": "SADL",
+        "budget": {"sadl_lambda_suf": 1.0, "sadl_audit_bank": "fixed11", "sadl_audit_cross_env": True},
+    },
+    "SADL-v2-no-fix2": {
+        "base": "SADL",
+        "budget": {"sadl_conf_marginal": 5.0, "sadl_audit_bank": "fixed11", "sadl_audit_cross_env": True},
+    },
+    "SADL-v2-no-fix3": {"base": "SADL", "budget": {"sadl_conf_marginal": 5.0, "sadl_lambda_suf": 1.0}},
 }
 
 TABLE2_METHODS = [
@@ -50,7 +91,11 @@ TABLE2_METHODS = [
     "SADL",
 ]
 BASELINES = [m for m in TABLE2_METHODS if not m.startswith("SADL")]
-ALL_METHODS = TABLE2_METHODS + list(_ABLATIONS)
+# Controls: not methods under test and not ablations of one, but the comparisons
+# a claim has to survive.  Kept separate so they never enter Table 2 by accident.
+CONTROL_METHODS = ["SimCLR-bank"]
+V2_VARIANTS = [m for m in _ABLATIONS if m.startswith("SADL-v2")]
+ALL_METHODS = TABLE2_METHODS + list(_ABLATIONS) + CONTROL_METHODS
 
 
 def build_method(name: str, budget: Budget, device, seed: int = 0) -> Method:
@@ -81,6 +126,7 @@ def method_meta(name: str) -> dict:
         "SADL-lite": SADLLite,
         "SADL": SADL,
         "SADL-joint": SADLJoint,
+        "SimCLR-bank": SimCLRBank,
     }
     cls = cls_map[base]
     return {

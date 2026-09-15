@@ -77,6 +77,27 @@ def conditional_novelty(q: torch.Tensor, prev_bits: torch.Tensor | None, conf_we
     return total - per_sample
 
 
+_SOLVE_ON_CPU = False
+
+
+def _small_solve(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+    """``solve(a, b)`` for a tiny system, portable across backends.
+
+    ``torch.linalg.solve`` is not implemented on MPS, which is the same gap that
+    forced the hand-rolled spectral norm in ``models/confuser.py``.  The system here
+    is at most a dozen rows, so falling back to CPU costs a negligible transfer and
+    keeps gradients: autograd differentiates through device moves.  The fallback is
+    decided once and remembered, so CUDA never pays a per-step synchronisation.
+    """
+    global _SOLVE_ON_CPU
+    if not _SOLVE_ON_CPU:
+        try:
+            return torch.linalg.solve(a, b)
+        except NotImplementedError:
+            _SOLVE_ON_CPU = True
+    return torch.linalg.solve(a.cpu(), b.cpu()).to(b.device)
+
+
 def env_shift(q: torch.Tensor, env: torch.Tensor, n_envs: int) -> torch.Tensor:
     """max_{e != e'} |E_{P^e}[q] - E_{P^e'}[q]| (Equation 16)."""
     means = []
@@ -162,6 +183,36 @@ class SADL(Method):
         cov = (z.T @ z / max(1, len(z) - 1)).pow(2)
         cov = (cov.sum() - torch.diagonal(cov).sum()) / feat.shape[1]
         return b.sadl_anchor * (var + b.sadl_anchor_cov * cov)
+
+    def _suf_residual(self, x: torch.Tensor, q: torch.Tensor, prev: torch.Tensor | None) -> torch.Tensor:
+        """Differentiable form of the Equation 20 probe, as a sufficiency penalty.
+
+        Ridge-regresses the retained code -- the previously accepted bits together
+        with the current soft assignment -- onto a fixed random projection of the
+        input, and returns the mean squared residual.  Gradients reach the head
+        through ``q``, so minimising it pushes the candidate distinction to carry
+        input information it would otherwise be free to discard.
+
+        Label-free by construction: the target is a projection of ``x``, never of
+        ``y``, so no task information enters pretraining.  The projection is drawn
+        once and cached, so the target is a fixed function of the input rather than
+        a moving one.
+        """
+        b = self.budget
+        flat = x.reshape(len(x), -1)
+        if getattr(self, "_suf_proj", None) is None or self._suf_proj.shape[0] != flat.shape[1]:
+            g = torch.Generator(device="cpu").manual_seed(self.seed + 9191)
+            p = torch.randn(flat.shape[1], b.sadl_suf_proj_dim, generator=g) / (flat.shape[1] ** 0.5)
+            self._suf_proj = p.to(x.device)
+        target = flat @ self._suf_proj
+        target = (target - target.mean(0)) / (target.std(0) + 1e-6)
+        cols = [q.reshape(-1, 1), torch.ones(len(x), 1, device=x.device)]
+        if prev is not None and prev.shape[1]:
+            cols.insert(0, prev)
+        design = torch.cat(cols, 1)
+        gram = design.T @ design + 1e-3 * torch.eye(design.shape[1], device=x.device)
+        w = _small_solve(gram, design.T @ target)
+        return (target - design @ w).pow(2).mean()
 
     def _warmstart(self, ds: MultiEnvDataset, steps: int) -> None:
         """Optional label-free trunk warm start on Confuser-consistent views.
@@ -272,7 +323,27 @@ class SADL(Method):
             # --- Confuser ascent on A_t (line 8), on the faster timescale
             if opt_phi is not None:
                 for _ in range(b.sadl_confuser_steps):
-                    adv = confuser.flip_objective(q_fn, x, ref, env)
+                    if b.sadl_conf_marginal > 0:
+                        # Equation 17 is maximised by pushing every input to one
+                        # side of the boundary, which makes the hard flip rate
+                        # identically min(p, 1-p) and caps novelty at Hb(eps_adv).
+                        # A conditional resampling of the nuisance cannot move the
+                        # marginal of a stable distinction, so charge the adversary
+                        # for moving it; what remains is genuine per-example
+                        # nuisance sensitivity in both directions.
+                        #
+                        # One forward pass, not two: the Confuser's spectral-norm
+                        # parametrisation updates its power-iteration buffers in
+                        # place on every forward in train mode, so calling it twice
+                        # invalidates the first graph.  This inlines exactly what
+                        # LearnedConfuser.flip_objective computes.
+                        pert = confuser(x, ref, env)
+                        q0, q1 = q_fn(x), q_fn(pert)
+                        adv = (q1 - q0).abs().mean() - b.sadl_conf_marginal * (
+                            q1.mean() - q0.mean()
+                        ).pow(2)
+                    else:
+                        adv = confuser.flip_objective(q_fn, x, ref, env)
                     opt_phi.zero_grad(set_to_none=True)
                     (-adv).backward(inputs=list(confuser.parameters()))
                     nn.utils.clip_grad_norm_(confuser.parameters(), 5.0)
@@ -309,6 +380,14 @@ class SADL(Method):
                 + self._anchor(feat)
                 + b.sadl_anchor * score_floor
             )
+            if b.sadl_lambda_suf > 0:
+                # Theorem 4.1 requires stable *and* sufficient distinctions, and
+                # Equation 18 asks for nothing but stability -- which is why the
+                # accepted codes come out invariant and nearly empty.  This is the
+                # Equation 20 compression probe used as a training signal rather
+                # than only as a stopping rule, so it stays label-free as
+                # Section 5.4 requires.
+                loss = loss + b.sadl_lambda_suf * self._suf_residual(x, q, prev)
             opt_theta.zero_grad(set_to_none=True)
             loss.backward(inputs=theta)
             nn.utils.clip_grad_norm_(theta, 5.0)
@@ -369,14 +448,23 @@ class SADL(Method):
         n_val: int = 512,
         audit_subsample: int | None = None,
     ) -> dict:
+        b = self.budget
         self.trunk.eval()
         head.eval()
         qs, ds_bits, envs = [], [], []
         a_learn, a_bank, a_worst = [], [], []
+        # Validation batches per environment, drawn first so that the audit can use
+        # a reference from a *different* environment.  env_resample swaps nuisance
+        # statistics with the reference; taking it from the same environment audits
+        # a weaker operation than the one training uses, where ``ref`` is rolled by
+        # one environment block.
+        xs_per_env = [
+            torch.as_tensor(s.val().x[: min(len(s.val()), n_val)]).to(self.device)
+            for s in ds.train_envs
+        ]
         for e, split in enumerate(ds.train_envs):
-            v = split.val()
-            n = min(len(v), n_val)
-            x = torch.as_tensor(v.x[:n]).to(self.device)
+            x = xs_per_env[e]
+            n = len(x)
             prev = self.prev_bits(x, t) if t else None
             logit = head(self.trunk(x), prev)
             bits = (logit > 0).to(torch.float32)
@@ -384,7 +472,12 @@ class SADL(Method):
             ds_bits.append(bits)
             env_ids = torch.full((n,), e, dtype=torch.long, device=self.device)
             envs.append(env_ids)
-            ref = torch.roll(x, shifts=max(1, n // 2), dims=0)
+            if b.sadl_audit_cross_env and len(xs_per_env) > 1:
+                other = xs_per_env[(e + 1) % len(xs_per_env)]
+                idx = torch.arange(n, device=self.device) % len(other)
+                ref = other[idx]
+            else:
+                ref = torch.roll(x, shifts=max(1, n // 2), dims=0)
             bit_fn = lambda z: (head(self.trunk(z), prev) > 0).to(torch.float32)
             # The acceptance test uses the strongest available attack: the
             # co-trained Confuser *and* the parameter-free bank.  Using the learned
@@ -407,8 +500,7 @@ class SADL(Method):
         env = torch.cat(envs)
         prev_all = None
         if t:
-            xs = torch.cat([torch.as_tensor(s.val().x[: min(len(s.val()), n_val)]).to(self.device) for s in ds.train_envs])
-            prev_all = self.prev_bits(xs, t)
+            prev_all = self.prev_bits(torch.cat(xs_per_env), t)
         novelty = float(conditional_novelty(bits, prev_all, conf_weight=1.0))
         shift = float(env_shift(bits, env, self.n_envs))
         adv_learned = float(torch.cat(a_learn).mean())

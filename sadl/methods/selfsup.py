@@ -10,7 +10,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from ..data import MultiEnvDataset
-from ..models import ConvDecoder, ConvEncoder, MLP
+from ..models import ConvDecoder, ConvEncoder, MLP, make_confuser
 from .base import Method
 
 
@@ -74,6 +74,64 @@ class SimCLR(Method):
         for x, _, _ in self.loader(ds):
             z1 = F.normalize(self.proj(self.encoder(simclr_augment(x))), dim=1)
             z2 = F.normalize(self.proj(self.encoder(simclr_augment(x))), dim=1)
+            z = torch.cat([z1, z2])
+            sim = z @ z.t() / b.simclr_temp
+            n = len(z1)
+            sim.fill_diagonal_(-1e4)
+            target = torch.cat([torch.arange(n, 2 * n), torch.arange(0, n)]).to(x.device)
+            loss = F.cross_entropy(sim, target)
+            opt.zero_grad(set_to_none=True)
+            loss.backward()
+            nn.utils.clip_grad_norm_(params, 5.0)
+            opt.step()
+        self.log["final_loss"] = float(loss.detach())
+        return self.log
+
+
+class SimCLRBank(SimCLR):
+    """Contrastive learning whose two views come from the Confuser's own bank.
+
+    The discriminating control for every claim SADL makes.  SADL's one clear win is
+    on ColoredMNIST, which is also the single dataset whose nuisance -- the colour
+    channel -- is literally an operation in the bank, since ``channel_mix`` carries
+    full colour permutations at strength 1.0.  Stock SimCLR fails there because
+    ``simclr_augment`` does crops, flips and mild photometric jitter and never
+    permutes colour, so the comparison cannot separate "sequential adversarial
+    distinction learning works" from "that transformation family covers this
+    nuisance".
+
+    This method holds the transformation family fixed and removes everything else:
+    no Separator heads, no minimax game, no acceptance test, no restarts, no
+    compression gate.  If it matches SADL-lite's stability gap, Algorithm 1 adds
+    nothing over choosing the right augmentations.  If it does not, the sequential
+    machinery is doing work the family alone does not.
+    """
+
+    name = "SimCLR-bank"
+    category = "contrastive (Confuser bank views)"
+
+    def _build(self, ds: MultiEnvDataset) -> None:
+        super()._build(ds)
+        # Same family the audit uses, so "coverage" means the same thing in both.
+        self.bank = make_confuser(self.budget.sadl_audit_bank, ds.in_shape[0], ds.n_train_envs).to(self.device)
+
+    def fit(self, ds: MultiEnvDataset) -> dict:
+        if not self._built:
+            self._build(ds)
+        b = self.budget
+        params = list(self.encoder.parameters()) + list(self.proj.parameters())
+        opt = torch.optim.Adam(params, lr=b.lr, weight_decay=b.weight_decay)
+        self.train_mode()
+        for x, _, _ in self.loader(ds):
+            # Reference for the environment-conditional ops comes from a different
+            # environment block, matching how SADL draws it during training.
+            ref = torch.roll(x, shifts=b.batch_per_env, dims=0)
+            if len(self.bank.bank):
+                v1, v2 = self.bank.candidates(x, ref, subsample=2)
+            else:
+                v1, v2 = x, x
+            z1 = F.normalize(self.proj(self.encoder(v1)), dim=1)
+            z2 = F.normalize(self.proj(self.encoder(v2)), dim=1)
             z = torch.cat([z1, z2])
             sim = z @ z.t() / b.simclr_temp
             n = len(z1)

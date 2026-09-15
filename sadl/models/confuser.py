@@ -210,7 +210,19 @@ def build_bank(n_ch: int, level: str = "learned") -> list[Op]:
         Op("soft_occlude", 1, _soft_occlude, 0.30),
     ]
     rich = full + [Op("env_resample", 1, _env_resample, 1.00)]
-    return {"none": [], "fixed3": core, "fixed7": mid, "fixed10": full, "learned": rich}[level]
+    # ``fixed11`` is ``rich`` as a *parameter-free* bank.  Proposition 5.1's
+    # condition (i) is about conditional nuisance resampling, and ``env_resample``
+    # is the operation that models it -- yet it appeared only at the ``learned``
+    # level, so the parameter-free auditor could never apply the operation the
+    # theory is stated in terms of.  This level exists so that it can.
+    return {
+        "none": [],
+        "fixed3": core,
+        "fixed7": mid,
+        "fixed10": full,
+        "fixed11": rich,
+        "learned": rich,
+    }[level]
 
 
 class FixedBankConfuser(nn.Module):
